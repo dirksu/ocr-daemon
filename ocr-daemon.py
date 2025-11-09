@@ -4,66 +4,66 @@ import fitz
 import pytesseract
 import shutil
 import tempfile
-from pathlib import Path
+import threading
+import signal
 from pdf2image import convert_from_path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from plyer import notification
 
 
-# === Dynamischer Dokumente-Pfad ===
-def get_documents_dir():
-    home = Path.home()
-    docs = None
+# === Einstellungen ===
+WATCH_PATH = os.path.expanduser(r"~\\Documents\\ocr-test")  # <--- dynamisch für jeden Benutzer
+POPPLER_PATH = r"C:\\Program Files\\poppler\\Library\\bin"  # <--- Pfad zu poppler/bin
+TESSERACT_CMD = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"  # <--- Pfad zu tesseract.exe
+LANG = "deu+eng"  # OCR-Sprachen
 
-    # macOS / Linux
-    if (home / "Documents").exists():
-        docs = home / "Documents"
-    # Windows (englisch oder lokalisiert)
-    elif (home / "Documents").exists():
-        docs = home / "Documents"
-    elif (home / "Dokumente").exists():
-        docs = home / "Dokumente"
-    else:
-        docs = home / "Documents"
-        docs.mkdir(exist_ok=True)
-
-    return docs
+# Stelle sicher, dass der Watch-Ordner existiert
+os.makedirs(WATCH_PATH, exist_ok=True)
+LOGFILE = os.path.join(WATCH_PATH, "ocr_daemon.log")
+SHOW_NOTIFICATIONS = True  # Desktop-Notifications aktivieren
+pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
 
-WATCH_PATH = get_documents_dir() / "OCR_Watch"  # Unterordner anlegen
-WATCH_PATH.mkdir(exist_ok=True)
-
-LANG = "deu+eng"
-LOGFILE = WATCH_PATH / "ocr_daemon.log"
-SHOW_NOTIFICATIONS = True
-
-
-# === Hilfsfunktionen ===
+# === Logging und Benachrichtigung ===
 def log(msg):
     ts = time.strftime("[%Y-%m-%d %H:%M:%S]")
-    line = f"{ts} {msg}"
-    print(line)
+    print(ts, msg)
+    os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
     with open(LOGFILE, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+        f.write(f"{ts} {msg}\n")
 
 
-def notify(title, message, icon=None):
-    if not SHOW_NOTIFICATIONS:
-        return
-    try:
-        notification.notify(
-            title=title,
-            message=message,
-            timeout=7,
-            app_name="OCR-Daemon",
-            app_icon=icon or None
-        )
-    except Exception as e:
-        log(f"[WARN] Notification failed: {e}")
+def notify(title, message):
+    """Cross-platform desktop notification."""
+    if SHOW_NOTIFICATIONS:
+        try:
+            notification.notify(
+                title=title,
+                message=message,
+                timeout=5,
+                app_name="OCR-Daemon"
+            )
+        except Exception as e:
+            log(f"[WARN] Notification failed: {e}")
 
 
+# === Cache zur Doppelverarbeitungs-Vermeidung ===
+processed_files = {}
+
+def recently_processed(path, delay=30):
+    """Verhindert doppelte Verarbeitung derselben Datei."""
+    now = time.time()
+    if path in processed_files and now - processed_files[path] < delay:
+        return True
+    processed_files[path] = now
+    threading.Timer(delay, lambda: processed_files.pop(path, None)).start()
+    return False
+
+
+# === Kernfunktionen ===
 def has_text_layer(pdf_path):
+    """Prüft, ob die PDF bereits eine Textebene enthält."""
     try:
         with fitz.open(pdf_path) as doc:
             for page in doc:
@@ -71,22 +71,27 @@ def has_text_layer(pdf_path):
                     return True
         return False
     except Exception as e:
-        log(f"[ERROR] Textprüfung fehlgeschlagen ({pdf_path}): {e}")
-        notify("Fehler bei Textprüfung", f"{os.path.basename(pdf_path)} konnte nicht gelesen werden.")
-        return False
+        log(f"[ERROR] Kann Textlayer in {pdf_path} nicht prüfen: {e}")
+        notify("Fehler bei PDF", f"{os.path.basename(pdf_path)} konnte nicht gelesen werden.")
+        # Datei überspringen, damit kein Endlos-OCR-Versuch
+        return True
 
 
 def ocr_pdf(pdf_path, lang=LANG):
-    log(f"[INFO] OCR gestartet: {pdf_path}")
+    """Führt OCR durch und ersetzt die Datei bei Erfolg."""
+    log(f"[INFO] OCR start: {pdf_path}")
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            images = convert_from_path(pdf_path, dpi=300, output_folder=tmpdir)
-            if not images:
-                raise RuntimeError("Keine Seiten im PDF gefunden")
-
+            images = convert_from_path(
+                pdf_path,
+                dpi=300,
+                output_folder=tmpdir,
+                poppler_path=POPPLER_PATH
+            )
             ocr_pages = []
+
             for i, img in enumerate(images, start=1):
-                log(f"  -> OCR Seite {i}/{len(images)}")
+                log(f"  -> OCR page {i}/{len(images)}")
                 pdf_bytes = pytesseract.image_to_pdf_or_hocr(img, lang=lang, extension='pdf')
                 page_path = os.path.join(tmpdir, f"page_{i}.pdf")
                 with open(page_path, "wb") as f:
@@ -102,20 +107,20 @@ def ocr_pdf(pdf_path, lang=LANG):
 
             if os.path.getsize(new_pdf_path) > 0:
                 shutil.move(new_pdf_path, pdf_path)
-                msg = f"OCR abgeschlossen: {os.path.basename(pdf_path)}"
+                msg = f"OCR erfolgreich abgeschlossen: {os.path.basename(pdf_path)}"
                 log(f"  ✅ {msg}")
-                notify("OCR erfolgreich", msg)
+                notify("OCR abgeschlossen", msg)
             else:
-                raise RuntimeError("OCR-Ausgabe war leer.")
+                log(f"  ⚠️ Leeres OCR-Ergebnis bei {pdf_path}")
         except Exception as e:
-            log(f"[ERROR] OCR fehlgeschlagen ({pdf_path}): {e}")
-            notify(
-                "❌ OCR-Fehler",
-                f"{os.path.basename(pdf_path)} konnte nicht verarbeitet werden.\nFehler: {e}"
-            )
+            log(f"[ERROR] OCR fehlgeschlagen für {pdf_path}: {e}")
+            notify("Fehler bei OCR", f"{os.path.basename(pdf_path)} konnte nicht verarbeitet werden.")
 
 
+# === Watchdog-Event-Handler ===
 class PDFHandler(FileSystemEventHandler):
+    """Reagiert auf neue oder geänderte PDF-Dateien."""
+
     def on_created(self, event):
         if not event.is_directory and event.src_path.lower().endswith(".pdf"):
             time.sleep(2)
@@ -127,6 +132,8 @@ class PDFHandler(FileSystemEventHandler):
             self.process(event.src_path)
 
     def process(self, path):
+        if recently_processed(path):
+            return
         log(f"[EVENT] Neue oder geänderte Datei: {path}")
         if not has_text_layer(path):
             ocr_pdf(path)
@@ -134,20 +141,30 @@ class PDFHandler(FileSystemEventHandler):
             log(f"[SKIP] Bereits Text vorhanden: {path}")
 
 
+# === Haupt-Daemon ===
 def run_daemon():
-    log(f"🚀 OCR-Daemon gestartet – überwacht: {WATCH_PATH}")
+    log(f"🚀 OCR Daemon gestartet – überwacht: {WATCH_PATH}")
     notify("OCR-Daemon gestartet", f"Überwacht: {WATCH_PATH}")
     event_handler = PDFHandler()
     observer = Observer()
-    observer.schedule(event_handler, str(WATCH_PATH), recursive=True)
+    observer.schedule(event_handler, WATCH_PATH, recursive=True)
     observer.start()
+
+    # Signal-Handler für sauberen Exit
+    def stop_daemon(sig, frame):
+        log("🛑 OCR Daemon beendet (Signal empfangen).")
+        notify("OCR-Daemon beendet", "Überwachung gestoppt.")
+        observer.stop()
+
+    signal.signal(signal.SIGINT, stop_daemon)
+    signal.signal(signal.SIGTERM, stop_daemon)
+
     try:
-        while True:
+        while observer.is_alive():
             time.sleep(5)
     except KeyboardInterrupt:
-        observer.stop()
-        log("🛑 OCR-Daemon manuell beendet.")
-        notify("OCR-Daemon beendet", "Überwachung gestoppt.")
+        stop_daemon(None, None)
+
     observer.join()
 
 
