@@ -1,146 +1,162 @@
-# 📄 PDF OCR Daemon
+# 🧠 OCR Daemon
 
-Ein plattformübergreifender Python-Daemon, der automatisch neue PDF-Dateien im Dokumente-Verzeichnis überwacht, fehlende OCR-Textebenen erkennt und mittels [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) automatisch hinzufügt.
-Ergebnis: durchsuchbare PDFs – ganz ohne manuelles Zutun. ✨
+Ein plattformübergreifender Python-Daemon, der automatisch ein Verzeichnis (standardmäßig den *Dokumente*-Ordner des aktuellen Benutzers) überwacht und neue PDF-Dateien erkennt. 
+Wenn die PDF noch keinen Textlayer enthält, wird automatisch eine OCR-Texterkennung (Tesseract) ausgeführt und das Ergebnis gespeichert. 
 
 ---
 
-## 🚀 Funktionen
+## 🚀 Funktionsübersicht
 
-- Automatische Überwachung des Dokumente-Verzeichnisses (plattformübergreifend)
-- Erkennung von PDFs **ohne Textlayer**
-- OCR mit [Tesseract](https://github.com/tesseract-ocr/tesseract) über [pytesseract](https://pypi.org/project/pytesseract/)
-- Mehrsprachige Texterkennung (automatisch wählbar)
-- Desktop-Benachrichtigung bei Erfolg oder Fehler (Windows, macOS, Linux)
-- Optionaler Autostart beim System-Login oder als Dienst
-- Saubere Log-Ausgabe und Fehlerhandling
+- Automatische Überwachung eines Verzeichnisses (Watchdog)
+- Texterkennung per **Tesseract OCR**
+- Mehrsprachige OCR (z. B. `deu+eng`)
+- Benachrichtigungen bei erfolgreicher oder fehlerhafter OCR
+- Tray-Icon mit Kontextmenü:
+  - **Jetzt scannen** – manuelles Scannen des Verzeichnisses
+  - **Beenden** – beendet den Daemon
+- Logging aller Aktionen in `ocr_daemon.log`
+- Ersetzt Original-PDF nach erfolgreicher Texterkennung
 
 ---
 
 ## 🧩 Voraussetzungen
 
-1. **Python 3.8+**  
-   👉 [https://www.python.org/downloads/](https://www.python.org/downloads/)
+### 🐍 Python & Pakete
 
-2. **Tesseract OCR**  
-   - **Windows:** Download unter [UB Mannheim Builds](https://github.com/UB-Mannheim/tesseract/wiki)  
-   - **macOS:** `brew install tesseract`  
-   - **Linux (Debian/Ubuntu):** `sudo apt install tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng`
-
-3. **Python-Pakete installieren:**
+**Python 3.9 oder neuer** ist empfohlen.  
+Installiere die Abhängigkeiten mit:
 
 ```bash
-pip install watchdog pytesseract pypdf2 pdf2image pillow plyer
+pip install watchdog pytesseract pdf2image plyer pystray pillow fitz
 ```
 
-*(Optional: `systemd-python` auf Linux für automatische Service-Erstellung)*
+### 📦 Externe Tools
+
+#### 🧾 Tesseract OCR
+
+- **Windows:** [Tesseract at UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
+- **Linux (Ubuntu/Debian):**
+  ```bash
+  sudo apt install tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng
+  ```
+- **macOS (Homebrew):**
+  ```bash
+  brew install tesseract
+  ```
+
+#### 📜 Poppler
+
+- **Windows:** [Poppler for Windows](https://github.com/oschwartz10612/poppler-windows/releases/)
+- **Linux:** 
+  ```bash
+  sudo apt install poppler-utils
+  ```
+- **macOS:** 
+  ```bash
+  brew install poppler
+  ```
+
+Nach der Installation müssen in der Python-Datei die Pfade angepasst werden:
+
+```python
+POPPLER_PATH = r"C:\Program Files\poppler\Library\bin"
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
 
 ---
 
 ## ⚙️ Konfiguration
 
-Standardmäßig überwacht der Daemon das Benutzer-Dokumente-Verzeichnis:
+Die wichtigsten Einstellungen findest du im oberen Bereich des Skripts:
+
 ```python
-Path.home() / "Documents"
+WATCH_PATH = os.path.expanduser(r"~\Documents\ocr-test")  # Überwachtes Verzeichnis
+LANG = "deu+eng"  # OCR-Sprachen
+SHOW_NOTIFICATIONS = True  # Desktop-Notifications aktivieren
 ```
-Ein Unterordner `OCR_Watch` wird automatisch angelegt.  
-Sprachen und Logfile können im Skript angepasst werden.
+
+Alle Logs werden im gleichen Verzeichnis gespeichert:
+
+```
+~/Documents/ocr-test/ocr_daemon.log
+```
 
 ---
 
-## 🔁 Automatischer Start beim System-Login
+## 💡 Autostart-Integration
 
 ### 🪟 Windows
 
-- **Variante 1:** Verknüpfung zu `ocr_daemon.py` oder `.bat` in:
-```
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
-```
-Beispielinhalt:
-```cmd
-pythonw "C:\Pfad\zu\ocr_daemon.py"
-```
+1. Erstelle eine **Verknüpfung** zur Python-Datei.  
+2. Kopiere sie in:
+   ```
+   %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup
+   ```
+3. Beim nächsten Login startet der Daemon automatisch im Hintergrund.
 
-- **Variante 2:** Registrierungseintrag
-```python
-import winreg, os, sys
-key = winreg.HKEY_CURRENT_USER
-subkey = r"Software\Microsoft\Windows\CurrentVersion\Run"
-with winreg.OpenKey(key, subkey, 0, winreg.KEY_SET_VALUE) as reg:
-    winreg.SetValueEx(reg, "PDF_OCR_Daemon", 0, winreg.REG_SZ, f'pythonw "{os.path.abspath(sys.argv[0])}"')
-```
-
-### 🍏 macOS (LaunchAgent)
-
-Datei: `~/Library/LaunchAgents/com.user.pdfocr.plist`
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key> <string>com.user.pdfocr</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/python3</string>
-    <string>/Users/USERNAME/path/to/ocr_daemon.py</string>
-  </array>
-  <key>RunAtLoad</key> <true/>
-  <key>KeepAlive</key> <true/>
-  <key>StandardOutPath</key> <string>/tmp/pdfocr.log</string>
-  <key>StandardErrorPath</key> <string>/tmp/pdfocr.err</string>
-</dict>
-</plist>
-```
+Optional kannst du in der Verknüpfung die Python-Konsole ausblenden, indem du sie mit `pythonw.exe` statt `python.exe` verknüpfst.
 
 ### 🐧 Linux (systemd)
 
-Datei: `~/.config/systemd/user/pdfocr.service`
+Erstelle eine systemd-Unit-Datei unter `~/.config/systemd/user/ocr-daemon.service`:
+
 ```ini
 [Unit]
-Description=PDF OCR Daemon
-After=network.target
+Description=OCR Daemon
 
 [Service]
-ExecStart=/usr/bin/python3 /home/USERNAME/path/to/ocr_daemon.py
-Restart=on-failure
-WorkingDirectory=/home/USERNAME
-StandardOutput=append:/home/USERNAME/.local/share/pdfocr.log
-StandardError=append:/home/USERNAME/.local/share/pdfocr.err
+ExecStart=/usr/bin/python3 /pfad/zu/ocr_daemon.py
+Restart=always
 
 [Install]
 WantedBy=default.target
 ```
-Aktivieren:
+
+Aktiviere und starte den Dienst mit:
+
 ```bash
-systemctl --user enable pdfocr.service
-systemctl --user start pdfocr.service
+systemctl --user enable ocr-daemon.service
+systemctl --user start ocr-daemon.service
+```
+
+### 🍎 macOS (launchd)
+
+Erstelle eine LaunchAgent-Datei in `~/Library/LaunchAgents/com.ocr.daemon.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.ocr.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/python3</string>
+        <string>/Users/username/path/to/ocr_daemon.py</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+```
+
+Dann aktivieren mit:
+```bash
+launchctl load ~/Library/LaunchAgents/com.ocr.daemon.plist
 ```
 
 ---
 
-## 🔔 Benachrichtigungen
+## 🧠 ToDo / Ideen
 
-Erfolg oder Fehler werden per Desktop-Notification angezeigt:
-
-- Windows: [plyer.notification](https://plyer.readthedocs.io/en/latest/#plyer.notification.notification)
-- macOS: via `osascript`
-- Linux: `notify-send` (muss installiert sein)
-
----
-
-## 🧠 TODOs & Ideen
-
-- [ ] CLI-Optionen (`--once`, `--verbose`, `--no-notify`)
-- [ ] Unterstützung für Passwort-geschützte PDFs
-- [ ] Automatische Sprachwahl via Dateinamen oder Verzeichnisstruktur
-- [ ] GUI-Tray-App mit Statusanzeige
-- [ ] Dockerfile für Serverbetrieb
-- [ ] WebUI zur Fortschrittsüberwachung
+- [ ] Fortschrittsanzeige bei OCR
+- [ ] Klickbare Notifications (PDF öffnen)
+- [ ] Optionaler Auto-Start direkt aus Skript
+- [ ] Mehrsprachige UI
+- [ ] Fehler-Dialoge mit Details
 
 ---
 
-## 🧾 Lizenz
+## 👨‍💻 Autor
 
-MIT License © 2025  
-Created with ❤️ by Dirk & Vanessa(KI)
+Projektidee und Umsetzung gemeinsam mit **Dirk** & *Vanessa (GPT-5)* ❤️  
+Lizenz: MIT
